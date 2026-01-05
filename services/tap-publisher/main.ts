@@ -77,8 +77,8 @@ class TapPublisher {
     this.indexer.record(async (evt) => {
       await tracer.startActiveSpan("process_record", async (span) => {
         try {
-          // filter for stream.place.* records
-          if (!evt.collection?.startsWith("stream.place.")) {
+          // filter for place.stream.* records
+          if (!evt.collection?.startsWith("place.stream.")) {
             span.end();
             return;
           }
