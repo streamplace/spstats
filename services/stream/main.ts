@@ -15,8 +15,6 @@ const DID_SCRAPE_INTERVAL_MS = parseInt(
   10,
 );
 
-console.log(TAP_ADMIN_PASSWORD);
-
 const STREAM_PLACE_COLLECTIONS = [
   "place.stream.chat.profile",
   "place.stream.chat.message",
@@ -416,7 +414,6 @@ process.on("unhandledRejection", (error) => {
       errorString: String(error),
       errorStack: error instanceof Error ? error.stack : undefined,
       errorType: error?.constructor?.name,
-      password: TAP_ADMIN_PASSWORD,
     },
     "unhandled rejection",
   );
@@ -430,7 +427,6 @@ await processor.start().catch((error) => {
       message: error?.message,
       stack: error?.stack,
       type: error?.constructor?.name,
-      password: TAP_ADMIN_PASSWORD,
     },
     "startup failed",
   );

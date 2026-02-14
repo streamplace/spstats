@@ -1,0 +1,78 @@
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: tap-data
+  namespace: default
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 10Gi
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: tap
+  namespace: default
+  labels:
+    app: tap
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: tap
+  template:
+    metadata:
+      labels:
+        app: tap
+    spec:
+      containers:
+        - name: tap
+          image: ghcr.io/bluesky-social/indigo/tap:0.1.8
+          ports:
+            - containerPort: 2480
+          env:
+            - name: TAP_ADMIN_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: spstats-secrets
+                  key: tap-admin-password
+            - name: TAP_PORT
+              value: "2480"
+            - name: TAP_DB_PATH
+              value: /data/tap.db
+            - name: TAP_RESYNC_PARALLELISM
+              value: "32"
+            - name: TAP_REPO_FETCH_TIMEOUT
+              value: "200s"
+          volumeMounts:
+            - name: tap-data
+              mountPath: /data
+          resources:
+            requests:
+              cpu: 250m
+              memory: 256Mi
+            limits:
+              cpu: "1"
+              memory: 1Gi
+      volumes:
+        - name: tap-data
+          persistentVolumeClaim:
+            claimName: tap-data
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: tap
+  namespace: default
+  labels:
+    app: tap
+spec:
+  selector:
+    app: tap
+  ports:
+    - port: 2480
+      targetPort: 2480
+      protocol: TCP
+

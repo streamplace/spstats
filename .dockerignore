@@ -1,0 +1,17 @@
+node_modules
+**/node_modules
+clickhouse_data
+redpanda_data
+tap_data
+.git
+.env
+*.csv
+*.json
+!package.json
+!pnpm-lock.yaml
+!pnpm-workspace.yaml
+cool-queries.sql
+observability
+docker-compose*.yml
+k8s
+

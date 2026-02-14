@@ -1,0 +1,51 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: stream
+  namespace: default
+  labels:
+    app: stream
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: stream
+  template:
+    metadata:
+      labels:
+        app: stream
+    spec:
+      containers:
+        - name: stream
+          # Update this to your internal registry image path after building:
+          #   docker build -t <your-registry>/spstats-stream:latest .
+          #   docker push <your-registry>/spstats-stream:latest
+          image: spstats-stream:latest
+          env:
+            - name: TAP_URL
+              value: "http://tap.default.svc.cluster.local:2480"
+            - name: TAP_ADMIN_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: spstats-secrets
+                  key: tap-admin-password
+            - name: CLICKHOUSE_URL
+              value: "http://clickhouse.default.svc.cluster.local:8123"
+            - name: CLICKHOUSE_DATABASE
+              value: sp_stats
+            - name: RELAY_URL
+              value: "https://relay1.us-east.bsky.network"
+            - name: DID_SCRAPE_INTERVAL_MS
+              value: "1200000"
+            - name: OTEL_EXPORTER_OTLP_ENDPOINT
+              value: "http://tempo.default.svc.cluster.local:4318/v1/traces"
+            - name: LOG_LEVEL
+              value: "info"
+          resources:
+            requests:
+              cpu: 250m
+              memory: 256Mi
+            limits:
+              cpu: "1"
+              memory: 1Gi
+

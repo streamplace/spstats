@@ -1,0 +1,109 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: clickhouse-init
+  namespace: default
+data:
+  init.sql: |
+    CREATE DATABASE IF NOT EXISTS sp_stats;
+
+    USE sp_stats;
+
+    CREATE TABLE IF NOT EXISTS stream_place_events (
+        at_uri String,
+        ingested_at DateTime64(3),
+        created_at Nullable(DateTime64(3)),
+        did String,
+        collection String,
+        rkey String,
+        event_type String,
+        action String,
+        is_backfill UInt8,
+        record_data JSON
+    ) ENGINE = MergeTree()
+    ORDER BY (collection, ingested_at, did)
+    PARTITION BY toYYYYMM(ingested_at);
+
+    CREATE INDEX IF NOT EXISTS idx_did ON stream_place_events (did) TYPE bloom_filter GRANULARITY 1;
+    CREATE INDEX IF NOT EXISTS idx_at_uri ON stream_place_events (at_uri) TYPE bloom_filter GRANULARITY 1;
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: clickhouse
+  namespace: default
+  labels:
+    app: clickhouse
+spec:
+  serviceName: clickhouse
+  replicas: 1
+  selector:
+    matchLabels:
+      app: clickhouse
+  template:
+    metadata:
+      labels:
+        app: clickhouse
+    spec:
+      containers:
+        - name: clickhouse
+          image: clickhouse/clickhouse-server:latest
+          ports:
+            - containerPort: 8123
+              name: http
+            - containerPort: 9000
+              name: native
+          env:
+            - name: CLICKHOUSE_DB
+              value: sp_stats
+            - name: CLICKHOUSE_USER
+              value: default
+            - name: CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT
+              value: "1"
+          volumeMounts:
+            - name: clickhouse-data
+              mountPath: /var/lib/clickhouse
+            - name: clickhouse-init
+              mountPath: /docker-entrypoint-initdb.d/init.sql
+              subPath: init.sql
+          resources:
+            requests:
+              cpu: 500m
+              memory: 1Gi
+            limits:
+              cpu: "2"
+              memory: 4Gi
+      volumes:
+        - name: clickhouse-init
+          configMap:
+            name: clickhouse-init
+  volumeClaimTemplates:
+    - metadata:
+        name: clickhouse-data
+      spec:
+        accessModes:
+          - ReadWriteOnce
+        resources:
+          requests:
+            storage: 50Gi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: clickhouse
+  namespace: default
+  labels:
+    app: clickhouse
+spec:
+  selector:
+    app: clickhouse
+  ports:
+    - port: 8123
+      targetPort: 8123
+      name: http
+      protocol: TCP
+    - port: 9000
+      targetPort: 9000
+      name: native
+      protocol: TCP
+
