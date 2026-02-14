@@ -25,7 +25,7 @@ interface TapEvent {
 class StreamProcessor {
   private tap: Tap;
   private indexer: SimpleIndexer;
-  private channel: TapChannel;
+  private channel: TapChannel | null = null;
   private clickhouse: ReturnType<typeof createClient>;
   private lastEventTime: number = Date.now();
   private healthCheckInterval?: NodeJS.Timeout;
