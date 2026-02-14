@@ -1,26 +1,23 @@
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: stream
+  name: spstats
   namespace: default
   labels:
-    app: stream
+    app: spstats
 spec:
   replicas: 1
   selector:
     matchLabels:
-      app: stream
+      app: spstats
   template:
     metadata:
       labels:
-        app: stream
+        app: spstats
     spec:
       containers:
-        - name: stream
-          # Update this to your internal registry image path after building:
-          #   docker build -t <your-registry>/spstats-stream:latest .
-          #   docker push <your-registry>/spstats-stream:latest
-          image: spstats-stream:latest
+        - name: spstats
+          image: ghcr.io/streamplace/spstats:latest
           env:
             - name: TAP_URL
               value: "http://tap.default.svc.cluster.local:2480"
