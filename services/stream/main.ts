@@ -1,4 +1,4 @@
-import { SimpleIndexer, Tap } from "@atproto/tap";
+import { SimpleIndexer, Tap, TapChannel } from "@atproto/tap";
 import { createClient } from "@clickhouse/client";
 import { initTelemetry } from "@sp-stats/telemetry";
 
@@ -8,20 +8,6 @@ const TAP_URL = process.env.TAP_URL || "http://localhost:2480";
 const TAP_ADMIN_PASSWORD = process.env.TAP_ADMIN_PASSWORD;
 const CLICKHOUSE_URL = process.env.CLICKHOUSE_URL || "http://localhost:8123";
 const CLICKHOUSE_DATABASE = process.env.CLICKHOUSE_DATABASE || "sp_stats";
-const RELAY_URL =
-  process.env.RELAY_URL || "https://relay1.us-east.bsky.network";
-const DID_SCRAPE_INTERVAL_MS = parseInt(
-  process.env.DID_SCRAPE_INTERVAL_MS || `${20 * 60 * 1000}`,
-  10,
-);
-
-console.log(TAP_ADMIN_PASSWORD);
-
-const STREAM_PLACE_COLLECTIONS = [
-  "place.stream.chat.profile",
-  "place.stream.chat.message",
-  "place.stream.livestream",
-];
 
 interface TapEvent {
   type: "record" | "identity";
@@ -39,10 +25,11 @@ interface TapEvent {
 class StreamProcessor {
   private tap: Tap;
   private indexer: SimpleIndexer;
-  private channel: any;
+  private channel: TapChannel;
   private clickhouse: ReturnType<typeof createClient>;
-  private didCache: Set<string> = new Set();
-  private scrapeInterval: NodeJS.Timeout | null = null;
+  private lastEventTime: number = Date.now();
+  private healthCheckInterval?: NodeJS.Timeout;
+  private isShuttingDown: boolean = false;
 
   constructor() {
     this.tap = new Tap(TAP_URL, { adminPassword: TAP_ADMIN_PASSWORD });
@@ -112,18 +99,59 @@ class StreamProcessor {
   }
 
   async restartChannel() {
-    logger.warn("restarting tap channel after error...");
+    if (this.isShuttingDown) {
+      return;
+    }
+
+    logger.warn("restarting tap connection...");
     try {
       if (this.channel) {
-        await this.channel.destroy().catch(() => {});
+        logger.info("destroying existing channel");
+        // don't wait for destroy - just fire and forget
+        this.channel.destroy().catch((err: any) => {
+          logger.warn({ error: err }, "error destroying channel (ignoring)");
+        });
+        this.channel = null;
+        logger.info("existing channel destroyed");
       }
+
+      logger.info("creating new tap client");
+      this.tap = new Tap(TAP_URL, { adminPassword: TAP_ADMIN_PASSWORD });
+
+      logger.info("creating new channel");
       this.channel = this.tap.channel(this.indexer);
+
+      logger.info("starting channel");
       this.channel.start();
-      logger.info("tap channel restarted");
+
+      this.lastEventTime = Date.now();
+      logger.info("tap connection restarted successfully");
     } catch (error) {
-      logger.error({ error }, "failed to restart channel");
+      logger.error(
+        {
+          error,
+          message: error instanceof Error ? error.message : String(error),
+          stack: error instanceof Error ? error.stack : undefined,
+        },
+        "failed to restart channel - retrying in 5s",
+      );
       setTimeout(() => this.restartChannel(), 5000);
     }
+  }
+
+  private startHealthCheck() {
+    this.healthCheckInterval = setInterval(() => {
+      const timeSinceLastEvent = Date.now() - this.lastEventTime;
+      const maxIdleTime = 600; // 6 seconds
+
+      if (timeSinceLastEvent > maxIdleTime) {
+        logger.warn(
+          { timeSinceLastEvent },
+          "no events received recently - restarting channel",
+        );
+        this.restartChannel();
+      }
+    }, 3000); // check every 3 seconds
   }
 
   private setupIndexer() {
@@ -157,22 +185,20 @@ class StreamProcessor {
           };
 
           await this.insertEvent(tapEvent);
+          this.lastEventTime = Date.now();
           span.end();
         } catch (error) {
           logger.error({ event: evt, error }, "failed to process record event");
           span.recordException(error as Error);
           span.end();
-          throw error;
+          // don't throw - let the stream continue processing other events
         }
       });
     });
 
     this.indexer.error(async (err) => {
-      logger.error({ error: err }, "indexer error");
-
-      if (err.message?.includes("RSV") || err.message?.includes("WebSocket")) {
-        await this.restartChannel();
-      }
+      logger.error({ error: err }, "indexer error - restarting channel");
+      await this.restartChannel();
     });
   }
 
@@ -181,146 +207,18 @@ class StreamProcessor {
       try {
         await this.ensureSchema();
 
-        logger.info("discovering DIDs from relay...");
-        await this.scrapeDids();
-        logger.info(
-          { did_count: this.didCache.size },
-          "initial scrape complete",
-        );
-        span.setAttribute("initial_dids.count", this.didCache.size);
-
         this.channel = this.tap.channel(this.indexer);
         this.channel.start();
+        this.lastEventTime = Date.now();
         logger.info("tap channel started");
 
-        logger.info(
-          { interval_ms: DID_SCRAPE_INTERVAL_MS },
-          "starting DID scrape job",
-        );
-        this.scrapeInterval = setInterval(() => {
-          this.scrapeDids().catch((error) => {
-            logger.error({ error }, "DID scrape job failed");
-          });
-        }, DID_SCRAPE_INTERVAL_MS);
+        this.startHealthCheck();
+        logger.info("health check started");
 
         logger.info("stream processor running");
         span.end();
       } catch (error) {
         logger.error({ error }, "failed to start");
-        span.recordException(error as Error);
-        span.end();
-        throw error;
-      }
-    });
-  }
-
-  private async scrapeDids() {
-    return tracer.startActiveSpan("scrape_dids", async (span) => {
-      const previousCount = this.didCache.size;
-
-      for (const collection of STREAM_PLACE_COLLECTIONS) {
-        logger.info({ collection }, "fetching DIDs");
-        try {
-          const dids = await this.fetchDidsForCollection(collection);
-          const newDids: string[] = [];
-
-          for (const did of dids) {
-            if (!this.didCache.has(did)) {
-              this.didCache.add(did);
-              newDids.push(did);
-            }
-          }
-
-          logger.info(
-            { collection, total: dids.length, new: newDids.length },
-            "fetched DIDs",
-          );
-
-          if (newDids.length > 0) {
-            logger.info({ count: newDids.length }, "adding new repos to tap");
-            await this.tap.addRepos(newDids);
-          }
-        } catch (error) {
-          logger.error({ collection, error }, "failed to fetch DIDs");
-          span.recordException(error as Error);
-        }
-      }
-
-      const addedCount = this.didCache.size - previousCount;
-      span.setAttribute("total_dids", this.didCache.size);
-      span.setAttribute("new_dids", addedCount);
-      logger.info(
-        {
-          previous: previousCount,
-          current: this.didCache.size,
-          added: addedCount,
-        },
-        "scrape complete",
-      );
-
-      span.end();
-    });
-  }
-
-  private async fetchDidsForCollection(collection: string): Promise<string[]> {
-    return tracer.startActiveSpan("fetch_dids_for_collection", async (span) => {
-      span.setAttribute("collection", collection);
-
-      const dids: string[] = [];
-      let cursor: string | undefined;
-      let pageCount = 0;
-
-      try {
-        do {
-          const url = new URL(
-            `${RELAY_URL}/xrpc/com.atproto.sync.listReposByCollection`,
-          );
-          url.searchParams.set("collection", collection);
-          if (cursor) {
-            url.searchParams.set("cursor", cursor);
-          }
-
-          const startTime = performance.now();
-          const response = await fetch(url.toString());
-          const duration = performance.now() - startTime;
-
-          if (!response.ok) {
-            const errorText = await response.text();
-            logger.error(
-              {
-                collection,
-                status: response.status,
-                error: errorText,
-              },
-              "relay request failed",
-            );
-            throw new Error(`HTTP ${response.status}: ${errorText}`);
-          }
-
-          const data = await response.json();
-          pageCount++;
-
-          if (data.repos) {
-            dids.push(...data.repos.map((repo: any) => repo.did));
-            logger.debug(
-              {
-                collection,
-                page: pageCount,
-                count: data.repos.length,
-                duration_ms: duration.toFixed(0),
-              },
-              "fetched page",
-            );
-          }
-
-          cursor = data.cursor;
-        } while (cursor);
-
-        span.setAttribute("pages", pageCount);
-        span.setAttribute("dids", dids.length);
-        span.end();
-        return dids;
-      } catch (error) {
         span.recordException(error as Error);
         span.end();
         throw error;
@@ -380,11 +278,11 @@ class StreamProcessor {
   }
 
   async stop() {
+    this.isShuttingDown = true;
     logger.info("shutting down...");
 
-    if (this.scrapeInterval) {
-      clearInterval(this.scrapeInterval);
-      this.scrapeInterval = null;
+    if (this.healthCheckInterval) {
+      clearInterval(this.healthCheckInterval);
     }
 
     if (this.channel) {
@@ -409,30 +307,44 @@ process.on("SIGTERM", async () => {
   process.exit(0);
 });
 
-process.on("unhandledRejection", (error) => {
+process.on("unhandledRejection", async (error) => {
   logger.error(
     {
       error,
       errorString: String(error),
       errorStack: error instanceof Error ? error.stack : undefined,
       errorType: error?.constructor?.name,
-      password: TAP_ADMIN_PASSWORD,
     },
-    "unhandled rejection",
+    "unhandled rejection - exiting",
   );
+  await processor.stop();
   process.exit(1);
 });
 
-await processor.start().catch((error) => {
+process.on("uncaughtException", async (error) => {
   logger.error(
     {
       error,
       message: error?.message,
       stack: error?.stack,
       type: error?.constructor?.name,
-      password: TAP_ADMIN_PASSWORD,
     },
-    "startup failed",
+    "uncaught exception - exiting",
   );
+  await processor.stop();
+  process.exit(1);
+});
+
+await processor.start().catch(async (error) => {
+  logger.error(
+    {
+      error,
+      message: error?.message,
+      stack: error?.stack,
+      type: error?.constructor?.name,
+    },
+    "startup failed - exiting",
+  );
+  await processor.stop();
   process.exit(1);
 });
