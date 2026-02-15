@@ -10,8 +10,9 @@ services:
       - TAP_ADMIN_PASSWORD=admin
       - TAP_PORT=2480
       - TAP_DB_PATH=/data/tap.db
-      - TAP_RESYNC_PARALLELISM=32
-      - TAP_REPO_FETCH_TIMEOUT=200s
+      - TAP_RESYNC_PARALLELISM=320
+      - TAP_SIGNAL_COLLECTION=place.stream.chat.profile
+      - TAP_COLLECTION_FILTERS=place.stream.*
     volumes:
       - ./tap_data:/data
     restart: unless-stopped
